@@ -6,20 +6,21 @@ import threading
 import logging
 import requests
 import subprocess
+import tempfile
 from pytube import Playlist
 import concurrent.futures
 
 # Configuration
 MAX_RETRY_ATTEMPTS = 5
 REQUEST_DELAY = 2
-DOWNLOAD_DIR = "downloads"
+TEMP_DIR = tempfile.gettempdir()  # Use system temp directory
 TRANSCRIPT_DIR = "transcripts"
 MAX_THREADS = 4
 INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", f"worker-{threading.get_native_id()}")
 
 # Terabox credentials - Replace with your actual credentials
-TERABOX_USERNAME = "2022cs620@student.uet.edu.pk"
-TERABOX_PASSWORD = "Usm1230@"
+TERABOX_USERNAME = "your_terabox_email"
+TERABOX_PASSWORD = "your_terabox_password"
 
 # Import drama data from transcript_fetcher
 try:
@@ -45,18 +46,149 @@ class TeraboxUploader:
         self.session = requests.Session()
         self.logged_in = False
         self.base_url = "https://www.terabox.com/api"
+        # Try to login immediately
+        self.login()
         
     def login(self):
         """Login to Terabox account"""
-        print("Terabox functionality is disabled for now - storing files locally only")
-        return False
+        print("Attempting to login to Terabox...")
+        try:
+            login_url = f"{self.base_url}/login"
+            payload = {
+                "username": TERABOX_USERNAME,
+                "password": TERABOX_PASSWORD
+            }
+            
+            response = self.session.post(login_url, data=payload)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("errno") == 0:
+                    self.logged_in = True
+                    print("✓ Successfully logged in to Terabox")
+                    return True
+                else:
+                    print(f"✗ Terabox login failed: {data.get('errmsg', 'Unknown error')}")
+            else:
+                print(f"✗ Terabox login failed with status code: {response.status_code}")
+                
+            return False
+        except Exception as e:
+            print(f"✗ Terabox login error: {str(e)}")
+            return False
+    
+    def create_folder(self, folder_path):
+        """Create a folder on Terabox (if it doesn't exist)"""
+        if not self.logged_in and not self.login():
+            print("Cannot create folder: Not logged in to Terabox")
+            return False
+            
+        try:
+            print(f"Creating folder in Terabox: {folder_path}")
+            create_url = f"{self.base_url}/create"
+            payload = {
+                "path": folder_path,
+                "isdir": 1
+            }
+            
+            response = self.session.post(create_url, data=payload)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("errno") == 0 or data.get("errno") == 31061:  # 31061 means folder already exists
+                    print(f"✓ Folder ready: {folder_path}")
+                    return True
+                else:
+                    print(f"✗ Failed to create folder: {data.get('errmsg', 'Unknown error')}")
+            else:
+                print(f"✗ Failed to create folder with status code: {response.status_code}")
+                
+            return False
+        except Exception as e:
+            print(f"✗ Create folder error: {str(e)}")
+            return False
+    
+    def upload_file(self, local_path, remote_path):
+        """Upload a file to Terabox"""
+        if not self.logged_in and not self.login():
+            print("Cannot upload file: Not logged in to Terabox")
+            return None
+            
+        try:
+            print(f"Uploading file to Terabox: {local_path} → {remote_path}")
+            file_size = os.path.getsize(local_path) / (1024 * 1024)
+            print(f"File size: {file_size:.2f} MB")
+            
+            # Ensure parent directory exists
+            parent_dir = os.path.dirname(remote_path)
+            if parent_dir and not self.create_folder(parent_dir):
+                print(f"Failed to create parent directory: {parent_dir}")
+                return None
+            
+            # Upload the file
+            upload_url = f"{self.base_url}/upload"
+            with open(local_path, 'rb') as file:
+                files = {'file': (os.path.basename(local_path), file)}
+                payload = {'path': remote_path}
+                
+                print("Starting upload...")
+                response = self.session.post(upload_url, data=payload, files=files)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("errno") == 0:
+                        print(f"✓ Successfully uploaded file to Terabox")
+                        # Get the share link
+                        file_id = data.get("fs_id")
+                        share_link = self.get_share_link(file_id) if file_id else None
+                        return share_link
+                    else:
+                        print(f"✗ Upload failed: {data.get('errmsg', 'Unknown error')}")
+                else:
+                    print(f"✗ Upload failed with status code: {response.status_code}")
+                
+            return None
+        except Exception as e:
+            print(f"✗ Upload error: {str(e)}")
+            return None
+    
+    def get_share_link(self, file_id):
+        """Get a shareable link for the uploaded file"""
+        try:
+            print(f"Getting share link for file ID: {file_id}")
+            share_url = f"{self.base_url}/share/set"
+            payload = {
+                "fid_list": f"[{file_id}]",
+                "period": 0,  # Permanent share
+                "channel_list": "[]",
+                "pwd": ""  # No password
+            }
+            
+            response = self.session.post(share_url, data=payload)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("errno") == 0:
+                    share_info = data.get("shorturl")
+                    if share_info:
+                        print(f"✓ Generated share link: {share_info}")
+                        return share_info
+                    else:
+                        print("✗ Share link not found in response")
+                else:
+                    print(f"✗ Failed to generate share link: {data.get('errmsg', 'Unknown error')}")
+            else:
+                print(f"✗ Share link request failed with status code: {response.status_code}")
+                
+            return None
+        except Exception as e:
+            print(f"✗ Share link error: {str(e)}")
+            return None
 
 class VideoDownloader:
     def __init__(self):
         print("\n" + "*"*60)
-        print(f"DRAMA VIDEO DOWNLOADER (Version 1.1)")
+        print(f"DRAMA VIDEO DOWNLOADER (Version 1.2)")
         print(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Running on instance: {INSTANCE_ID}")
+        print(f"Temp directory: {TEMP_DIR}")
         print("*"*60 + "\n")
         
         # Check for yt-dlp
@@ -72,9 +204,15 @@ class VideoDownloader:
         self.processed_episodes = set()
         
         # Initialize Terabox uploader
+        print("Initializing Terabox uploader...")
         self.terabox = TeraboxUploader()
-        self.terabox_available = False
-        print("⚠ Terabox integration disabled. Running in LOCAL MODE (files will be saved locally only)")
+        self.terabox_available = self.terabox.logged_in
+        
+        if self.terabox_available:
+            print("✓ Terabox login successful. Will upload files directly to Terabox.")
+        else:
+            print("⚠ Terabox login failed. Cannot upload files!")
+            raise Exception("Terabox login failed. Aborting as direct upload was requested.")
     
     def _check_yt_dlp(self):
         """Check if yt-dlp is installed"""
@@ -95,7 +233,7 @@ class VideoDownloader:
     def download_video(self, url, output_path):
         """Download a YouTube video using yt-dlp"""
         print(f"Starting download from URL: {url}")
-        print(f"Output path: {output_path}")
+        print(f"Temporary output path: {output_path}")
         
         # Make sure the output directory exists
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -103,8 +241,8 @@ class VideoDownloader:
         if self.yt_dlp_available:
             return self._download_with_yt_dlp(url, output_path)
         else:
-            print("Attempting direct download with requests (limited functionality)")
-            return self._download_with_requests(url, output_path)
+            print("yt-dlp is required for direct Terabox uploads. Please install it.")
+            return False
     
     def _download_with_yt_dlp(self, url, output_path):
         """Download video using yt-dlp"""
@@ -164,31 +302,6 @@ class VideoDownloader:
         print("All download attempts failed")
         return False
     
-    def _download_with_requests(self, url, output_path):
-        """Very basic direct download attempt (fallback only)"""
-        print("⚠️ Attempting direct download (not recommended)...")
-        print("This method will likely fail with YouTube videos.")
-        print("Please install yt-dlp for better results.")
-        
-        try:
-            response = requests.get(url, stream=True)
-            if response.status_code == 200:
-                with open(output_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=1024*1024):
-                        if chunk:
-                            f.write(chunk)
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    print(f"Download complete! File saved to {output_path}")
-                    return True
-                else:
-                    print("Download failed - empty file received")
-            else:
-                print(f"Direct download failed with status code: {response.status_code}")
-        except Exception as e:
-            print(f"Direct download failed: {str(e)}")
-        
-        return False
-    
     def process_episode(self, drama_name, idx, url):
         """Process a single episode"""
         # Check if this job is already processed
@@ -198,55 +311,79 @@ class VideoDownloader:
             return False
             
         episode_filename = f"{drama_name}_Ep_{idx}.mp4"
-        local_path = os.path.join(DOWNLOAD_DIR, drama_name, episode_filename)
-        
-        # Create local directory if it doesn't exist
-        if not os.path.exists(os.path.dirname(local_path)):
-            print(f"Creating directory: {os.path.dirname(local_path)}")
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        temp_path = os.path.join(TEMP_DIR, episode_filename)
+        terabox_path = f"/dramas/{drama_name}/{episode_filename}"
         
         logger.info(f"Processing {drama_name} episode {idx}: {url}")
         print(f"\n--------- PROCESSING {drama_name} Episode {idx} ---------")
         print(f"YouTube URL: {url}")
-        print(f"Local path: {local_path}")
+        print(f"Temporary path: {temp_path}")
+        print(f"Terabox destination: {terabox_path}")
         
         # Download the video
         print("\n--- VIDEO DOWNLOAD PHASE ---")
-        if self.download_video(url, local_path):
+        download_success = self.download_video(url, temp_path)
+        
+        if download_success:
             logger.info(f"Successfully downloaded {episode_filename}")
             print(f"✓ Downloaded: {episode_filename}")
             
-            # Check for corresponding transcripts
-            print("\n--- TRANSCRIPT PROCESSING PHASE ---")
-            transcript_base = f"transcripts/{drama_name}_Ep_{idx}"
-            transcript_files = [
-                f"{transcript_base}_English_T.txt",
-                f"{transcript_base}_English.txt",
-                f"{transcript_base}_Urdu_T.txt",
-                f"{transcript_base}_Urdu.txt"
-            ]
+            # Upload to Terabox
+            print("\n--- TERABOX UPLOAD PHASE ---")
+            terabox_link = self.terabox.upload_file(temp_path, terabox_path)
             
-            print(f"Checking for transcript files with base: {transcript_base}")
+            # Delete temporary file regardless of upload success
+            try:
+                print(f"Deleting temporary file: {temp_path}")
+                os.remove(temp_path)
+                print(f"✓ Cleaned up temporary file")
+            except Exception as e:
+                print(f"⚠ Failed to delete temporary file: {str(e)}")
             
-            # Check for transcripts
-            transcript_count = 0
-            for transcript_file in transcript_files:
-                if os.path.exists(transcript_file):
-                    print(f"Found transcript: {transcript_file}")
-                    transcript_count += 1
+            if terabox_link:
+                print(f"✓ Uploaded to Terabox: {terabox_path}")
+                print(f"✓ Terabox Link: {terabox_link}")
+                
+                # Check for corresponding transcripts
+                print("\n--- TRANSCRIPT PROCESSING PHASE ---")
+                transcript_base = f"transcripts/{drama_name}_Ep_{idx}"
+                transcript_files = [
+                    f"{transcript_base}_English_T.txt",
+                    f"{transcript_base}_English.txt",
+                    f"{transcript_base}_Urdu_T.txt",
+                    f"{transcript_base}_Urdu.txt"
+                ]
+                
+                print(f"Checking for transcript files with base: {transcript_base}")
+                
+                # Upload transcripts if they exist
+                transcript_count = 0
+                for transcript_file in transcript_files:
+                    if os.path.exists(transcript_file):
+                        print(f"Found transcript: {transcript_file}")
+                        
+                        # Upload transcript to Terabox
+                        terabox_transcript_path = f"/transcripts/{drama_name}/{os.path.basename(transcript_file)}"
+                        transcript_link = self.terabox.upload_file(transcript_file, terabox_transcript_path)
+                        if transcript_link:
+                            print(f"✓ Uploaded transcript to Terabox: {transcript_link}")
+                        transcript_count += 1
+                    else:
+                        print(f"Transcript not found: {transcript_file}")
+                
+                if transcript_count == 0:
+                    print("No transcript files found")
                 else:
-                    print(f"Transcript not found: {transcript_file}")
-            
-            if transcript_count == 0:
-                print("No transcript files found")
+                    print(f"✓ Processed {transcript_count} transcript files")
+                
+                # Mark as processed only if video upload succeeded
+                self.processed_episodes.add(episode_key)
+                print(f"✓ Marked episode as processed")
+                print(f"--------- FINISHED {drama_name} Episode {idx} ---------\n")
+                return True
             else:
-                print(f"✓ Found {transcript_count} transcript files")
-            
-            # Mark episode as processed
-            self.processed_episodes.add(episode_key)
-            print(f"✓ Marked episode as processed")
-            print(f"--------- FINISHED {drama_name} Episode {idx} ---------\n")
-            return True
+                logger.error(f"Failed to upload {episode_filename} to Terabox")
+                print(f"✗ Failed to upload {episode_filename} to Terabox")
         else:
             logger.error(f"Failed to download episode {idx}")
             print(f"✗ Failed to download episode {idx}")
@@ -353,11 +490,6 @@ class VideoDownloader:
 
 
 if __name__ == "__main__":
-    # Create directories if they don't exist
-    if not os.path.exists(DOWNLOAD_DIR):
-        print(f"Creating download directory: {DOWNLOAD_DIR}")
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    
     print("\nInitializing downloader...")
     downloader = VideoDownloader()
     
