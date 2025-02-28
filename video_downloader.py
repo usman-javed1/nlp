@@ -16,8 +16,8 @@ REQUEST_DELAY = 2
 DOWNLOAD_DIR = "downloads"
 TRANSCRIPT_DIR = "transcripts"
 MAX_THREADS = 4  # Number of concurrent downloads
-S3_BUCKET = "drama-content"  # S3 bucket for storing content
-S3_COORD_BUCKET = "drama-coordination"  # S3 bucket for coordination
+S3_BUCKET = "nlpbucket21"  # S3 bucket for storing content
+S3_COORD_BUCKET = "socsite"  # S3 bucket for coordination
 S3_PATH_PREFIX = "job_status/"
 
 # Get instance ID from environment or use public IP
