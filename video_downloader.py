@@ -146,7 +146,13 @@ class VideoDownloader:
         """Upload file to S3 bucket"""
         try:
             self.s3_client.upload_file(local_path, S3_BUCKET, s3_key)
+            
+            # Generate the S3 URL for the uploaded file
+            s3_url = f"https://{S3_BUCKET}.s3.amazonaws.com/{s3_key}"
+            
             logger.info(f"Uploaded {local_path} to s3://{S3_BUCKET}/{s3_key}")
+            print(f"File URL: {s3_url}")  # Print URL to console
+            
             return True
         except Exception as e:
             logger.error(f"Failed to upload to S3: {str(e)}")
@@ -167,10 +173,13 @@ class VideoDownloader:
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         
         logger.info(f"Processing {drama_name} episode {idx}: {url}")
+        print(f"\n--------- PROCESSING {drama_name} Episode {idx} ---------")
+        print(f"YouTube URL: {url}")
         
         # Download the video
         if self.download_video(url, local_path):
             logger.info(f"Successfully downloaded {episode_filename}")
+            print(f"✓ Downloaded: {episode_filename}")
             
             # Upload to S3
             if self.upload_to_s3(local_path, s3_video_key):
@@ -185,26 +194,41 @@ class VideoDownloader:
                     f"{transcript_base}_Urdu.txt"
                 ]
                 
+                print(f"Checking for transcripts...")
+                
                 # Upload transcripts if they exist
+                transcript_count = 0
                 for transcript_file in transcript_files:
                     if os.path.exists(transcript_file):
                         s3_transcript_key = f"transcripts/{drama_name}/{os.path.basename(transcript_file)}"
                         if self.upload_to_s3(transcript_file, s3_transcript_key):
+                            transcript_count += 1
                             logger.info(f"Uploaded transcript {transcript_file}")
+                
+                if transcript_count == 0:
+                    print("No transcript files found")
+                else:
+                    print(f"✓ Uploaded {transcript_count} transcript files")
                 
                 # Delete local file after successful upload
                 try:
                     os.remove(local_path)
                     logger.info(f"Deleted local file {local_path}")
+                    print(f"✓ Cleaned up local file: {local_path}")
                 except Exception as e:
                     logger.warning(f"Failed to delete local file: {str(e)}")
+                    print(f"⚠ Failed to delete local file: {str(e)}")
                 
                 # Mark job as complete
                 self.mark_job_complete(drama_name, idx)
+                print(f"✓ Marked job as complete")
+                print(f"--------- FINISHED {drama_name} Episode {idx} ---------\n")
             else:
                 logger.error(f"Failed to upload {episode_filename} to S3")
+                print(f"✗ Failed to upload {episode_filename} to S3")
         else:
             logger.error(f"Failed to download episode {idx}")
+            print(f"✗ Failed to download episode {idx}")
     
     def process_drama(self, drama_name):
         """Process a single drama with multithreading"""
