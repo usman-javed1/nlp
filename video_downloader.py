@@ -9,6 +9,22 @@ import logging
 import concurrent.futures
 from pytube import YouTube, Playlist
 from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Get AWS credentials from environment variables
+AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')  # Default to us-east-1 if not specified
+
+# Create a boto3 session with explicit credentials
+boto3_session = boto3.Session(
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION
+)
 
 # Configuration
 MAX_RETRY_ATTEMPTS = 5
@@ -16,8 +32,8 @@ REQUEST_DELAY = 2
 DOWNLOAD_DIR = "downloads"
 TRANSCRIPT_DIR = "transcripts"
 MAX_THREADS = 4  # Number of concurrent downloads
-S3_BUCKET = "nlpbucket21"  # S3 bucket for storing content
-S3_COORD_BUCKET = "socsite"  # S3 bucket for coordination
+S3_BUCKET = os.getenv('S3_BUCKET', 'drama-content')  # S3 bucket for storing content
+S3_COORD_BUCKET = os.getenv('S3_COORD_BUCKET', 'drama-coordination')  # S3 bucket for coordination
 S3_PATH_PREFIX = "job_status/"
 
 # Get instance ID from environment or use public IP
