@@ -5,7 +5,8 @@ import json
 import threading
 import logging
 import requests
-from pytube import YouTube, Playlist
+import subprocess
+from pytube import Playlist
 import concurrent.futures
 
 # Configuration
@@ -47,142 +48,24 @@ class TeraboxUploader:
         
     def login(self):
         """Login to Terabox account"""
-        print("Attempting to login to Terabox...")
-        try:
-            login_url = f"{self.base_url}/login"
-            payload = {
-                "username": TERABOX_USERNAME,
-                "password": TERABOX_PASSWORD
-            }
-            
-            response = self.session.post(login_url, data=payload)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("errno") == 0:
-                    self.logged_in = True
-                    print("✓ Successfully logged in to Terabox")
-                    return True
-                else:
-                    print(f"✗ Terabox login failed: {data.get('errmsg', 'Unknown error')}")
-            else:
-                print(f"✗ Terabox login failed with status code: {response.status_code}")
-                
-            return False
-        except Exception as e:
-            print(f"✗ Terabox login error: {str(e)}")
-            return False
-    
-    def create_folder(self, folder_path):
-        """Create a folder on Terabox (if it doesn't exist)"""
-        if not self.logged_in and not self.login():
-            print("Cannot create folder: Not logged in to Terabox")
-            return False
-            
-        try:
-            print(f"Creating folder in Terabox: {folder_path}")
-            create_url = f"{self.base_url}/create"
-            payload = {
-                "path": folder_path,
-                "isdir": 1
-            }
-            
-            response = self.session.post(create_url, data=payload)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("errno") == 0 or data.get("errno") == 31061:  # 31061 means folder already exists
-                    print(f"✓ Folder ready: {folder_path}")
-                    return True
-                else:
-                    print(f"✗ Failed to create folder: {data.get('errmsg', 'Unknown error')}")
-            else:
-                print(f"✗ Failed to create folder with status code: {response.status_code}")
-                
-            return False
-        except Exception as e:
-            print(f"✗ Create folder error: {str(e)}")
-            return False
-    
-    def upload_file(self, local_path, remote_path):
-        """Upload a file to Terabox"""
-        if not self.logged_in and not self.login():
-            print("Cannot upload file: Not logged in to Terabox")
-            return None
-            
-        try:
-            print(f"Uploading file to Terabox: {local_path} → {remote_path}")
-            file_size = os.path.getsize(local_path) / (1024 * 1024)
-            print(f"File size: {file_size:.2f} MB")
-            
-            # Ensure parent directory exists
-            parent_dir = os.path.dirname(remote_path)
-            if parent_dir and not self.create_folder(parent_dir):
-                print(f"Failed to create parent directory: {parent_dir}")
-                return None
-            
-            # Upload the file
-            upload_url = f"{self.base_url}/upload"
-            with open(local_path, 'rb') as file:
-                files = {'file': (os.path.basename(local_path), file)}
-                payload = {'path': remote_path}
-                
-                print("Starting upload...")
-                response = self.session.post(upload_url, data=payload, files=files)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("errno") == 0:
-                        print(f"✓ Successfully uploaded file to Terabox")
-                        # Get the share link
-                        file_id = data.get("fs_id")
-                        share_link = self.get_share_link(file_id) if file_id else None
-                        return share_link
-                    else:
-                        print(f"✗ Upload failed: {data.get('errmsg', 'Unknown error')}")
-                else:
-                    print(f"✗ Upload failed with status code: {response.status_code}")
-                
-            return None
-        except Exception as e:
-            print(f"✗ Upload error: {str(e)}")
-            return None
-    
-    def get_share_link(self, file_id):
-        """Get a shareable link for the uploaded file"""
-        try:
-            print(f"Getting share link for file ID: {file_id}")
-            share_url = f"{self.base_url}/share"
-            payload = {
-                "fs_ids": f"[{file_id}]",
-                "period": 0  # Permanent link
-            }
-            
-            response = self.session.post(share_url, data=payload)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("errno") == 0:
-                    link = data.get("link", "")
-                    if link:
-                        print(f"✓ Generated share link: {link}")
-                        return link
-                    else:
-                        print("✗ No share link received in response")
-                else:
-                    print(f"✗ Failed to get share link: {data.get('errmsg', 'Unknown error')}")
-            else:
-                print(f"✗ Failed to get share link with status code: {response.status_code}")
-                
-            return None
-        except Exception as e:
-            print(f"✗ Share link error: {str(e)}")
-            return None
+        print("Terabox functionality is disabled for now - storing files locally only")
+        return False
 
 class VideoDownloader:
     def __init__(self):
         print("\n" + "*"*60)
-        print(f"DRAMA VIDEO DOWNLOADER (Version 1.0)")
+        print(f"DRAMA VIDEO DOWNLOADER (Version 1.1)")
         print(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Running on instance: {INSTANCE_ID}")
         print("*"*60 + "\n")
+        
+        # Check for yt-dlp
+        self.yt_dlp_available = self._check_yt_dlp()
+        if not self.yt_dlp_available:
+            print("\n⚠️ yt-dlp not found. Please install it:")
+            print("pip install yt-dlp")
+            print("or download from: https://github.com/yt-dlp/yt-dlp/releases")
+            print("Continuing with limited functionality...\n")
         
         self.lock = threading.Lock()
         self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS)
@@ -190,49 +73,120 @@ class VideoDownloader:
         
         # Initialize Terabox uploader
         self.terabox = TeraboxUploader()
-        if self.terabox.login():
-            self.terabox_available = True
-        else:
-            self.terabox_available = False
-            print("⚠ Terabox login failed. Running in LOCAL MODE (files will be saved locally only)")
-        
+        self.terabox_available = False
+        print("⚠ Terabox integration disabled. Running in LOCAL MODE (files will be saved locally only)")
+    
+    def _check_yt_dlp(self):
+        """Check if yt-dlp is installed"""
+        try:
+            result = subprocess.run(
+                ["yt-dlp", "--version"], 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            if result.returncode == 0:
+                print(f"Found yt-dlp version: {result.stdout.strip()}")
+                return True
+            return False
+        except FileNotFoundError:
+            return False
+    
     def download_video(self, url, output_path):
-        """Download a YouTube video using pytube"""
+        """Download a YouTube video using yt-dlp"""
         print(f"Starting download from URL: {url}")
         print(f"Output path: {output_path}")
         
+        # Make sure the output directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        if self.yt_dlp_available:
+            return self._download_with_yt_dlp(url, output_path)
+        else:
+            print("Attempting direct download with requests (limited functionality)")
+            return self._download_with_requests(url, output_path)
+    
+    def _download_with_yt_dlp(self, url, output_path):
+        """Download video using yt-dlp"""
         for attempt in range(MAX_RETRY_ATTEMPTS):
             try:
-                print(f"Download attempt {attempt+1}/{MAX_RETRY_ATTEMPTS}...")
-                yt = YouTube(url)
-                print(f"YouTube object created. Video title: {yt.title}")
+                print(f"Download attempt {attempt+1}/{MAX_RETRY_ATTEMPTS} using yt-dlp...")
                 
-                # Get highest resolution stream with video and audio
-                print("Searching for best quality stream...")
-                stream = yt.streams.filter(progressive=True).order_by('resolution').desc().first()
+                # Build the yt-dlp command
+                cmd = [
+                    "yt-dlp",
+                    url,
+                    "-o", output_path,
+                    "--no-playlist",
+                    "--format", "best[ext=mp4]",
+                    "--no-check-certificate",
+                    "--no-warnings"
+                ]
                 
-                if not stream:
-                    print("No progressive stream found, falling back to highest resolution")
-                    stream = yt.streams.filter(file_extension='mp4').order_by('resolution').desc().first()
-                    
-                if stream:
-                    print(f"Found stream: {stream.resolution}, {stream.mime_type}, {stream.filesize_mb:.2f} MB")
-                    print(f"Downloading file...")
-                    stream.download(filename=output_path)
-                    print(f"Download complete! File saved to {output_path}")
+                print(f"Running command: {' '.join(cmd)}")
+                
+                # Run yt-dlp
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                # Process output in real-time
+                while True:
+                    output = process.stdout.readline()
+                    if output == '' and process.poll() is not None:
+                        break
+                    if output:
+                        print(output.strip())
+                
+                # Get the return code
+                return_code = process.poll()
+                
+                # Check if download succeeded
+                if return_code == 0 and os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path) / (1024 * 1024)
+                    print(f"Download complete! File saved to {output_path} ({file_size:.2f} MB)")
                     return True
                 else:
-                    print("No suitable stream found for this video")
-                    logger.error("No suitable stream found")
-                    return False
+                    stderr = process.stderr.read()
+                    print(f"yt-dlp error: {stderr}")
                     
             except Exception as e:
                 logger.error(f"Download attempt {attempt+1} failed: {str(e)}")
                 print(f"Download attempt {attempt+1} failed with error: {str(e)}")
-                print(f"Waiting {REQUEST_DELAY * (attempt + 1)} seconds before retrying...")
-                time.sleep(REQUEST_DELAY * (attempt + 1))
+            
+            # Only retry if we haven't succeeded
+            print(f"Waiting {REQUEST_DELAY * (attempt + 1)} seconds before retrying...")
+            time.sleep(REQUEST_DELAY * (attempt + 1))
         
         print("All download attempts failed")
+        return False
+    
+    def _download_with_requests(self, url, output_path):
+        """Very basic direct download attempt (fallback only)"""
+        print("⚠️ Attempting direct download (not recommended)...")
+        print("This method will likely fail with YouTube videos.")
+        print("Please install yt-dlp for better results.")
+        
+        try:
+            response = requests.get(url, stream=True)
+            if response.status_code == 200:
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=1024*1024):
+                        if chunk:
+                            f.write(chunk)
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    print(f"Download complete! File saved to {output_path}")
+                    return True
+                else:
+                    print("Download failed - empty file received")
+            else:
+                print(f"Direct download failed with status code: {response.status_code}")
+        except Exception as e:
+            print(f"Direct download failed: {str(e)}")
+        
         return False
     
     def process_episode(self, drama_name, idx, url):
@@ -245,7 +199,6 @@ class VideoDownloader:
             
         episode_filename = f"{drama_name}_Ep_{idx}.mp4"
         local_path = os.path.join(DOWNLOAD_DIR, drama_name, episode_filename)
-        terabox_path = f"/dramas/{drama_name}/{episode_filename}"
         
         # Create local directory if it doesn't exist
         if not os.path.exists(os.path.dirname(local_path)):
@@ -263,28 +216,6 @@ class VideoDownloader:
             logger.info(f"Successfully downloaded {episode_filename}")
             print(f"✓ Downloaded: {episode_filename}")
             
-            # Upload to Terabox if available
-            if self.terabox_available:
-                print("\n--- TERABOX UPLOAD PHASE ---")
-                terabox_link = self.terabox.upload_file(local_path, terabox_path)
-                if terabox_link:
-                    print(f"✓ Uploaded to Terabox: {terabox_path}")
-                    print(f"Terabox Link: {terabox_link}")
-                    
-                    # Delete local file after successful upload
-                    try:
-                        print(f"Deleting local file: {local_path}")
-                        os.remove(local_path)
-                        logger.info(f"Deleted local file {local_path}")
-                        print(f"✓ Cleaned up local file: {local_path}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete local file: {str(e)}")
-                        print(f"⚠ Failed to delete local file: {str(e)}")
-                else:
-                    print(f"✗ Failed to upload to Terabox. Keeping local file.")
-            else:
-                print("Terabox upload skipped. File saved locally.")
-            
             # Check for corresponding transcripts
             print("\n--- TRANSCRIPT PROCESSING PHASE ---")
             transcript_base = f"transcripts/{drama_name}_Ep_{idx}"
@@ -297,19 +228,11 @@ class VideoDownloader:
             
             print(f"Checking for transcript files with base: {transcript_base}")
             
-            # Upload transcripts if they exist
+            # Check for transcripts
             transcript_count = 0
             for transcript_file in transcript_files:
                 if os.path.exists(transcript_file):
                     print(f"Found transcript: {transcript_file}")
-                    
-                    # Upload transcript to Terabox if available
-                    if self.terabox_available:
-                        terabox_transcript_path = f"/transcripts/{drama_name}/{os.path.basename(transcript_file)}"
-                        transcript_link = self.terabox.upload_file(transcript_file, terabox_transcript_path)
-                        if transcript_link:
-                            print(f"✓ Uploaded transcript to Terabox: {transcript_link}")
-                    
                     transcript_count += 1
                 else:
                     print(f"Transcript not found: {transcript_file}")
@@ -317,7 +240,7 @@ class VideoDownloader:
             if transcript_count == 0:
                 print("No transcript files found")
             else:
-                print(f"✓ Processed {transcript_count} transcript files")
+                print(f"✓ Found {transcript_count} transcript files")
             
             # Mark episode as processed
             self.processed_episodes.add(episode_key)
@@ -343,13 +266,40 @@ class VideoDownloader:
             playlist = Playlist(data['link'])
             playlist._video_regex = re.compile(r'"url":"(/watch\?v=[\w-]*)')
             
-            total_episodes = len(playlist.video_urls)
-            logger.info(f"Found {total_episodes} videos in playlist")
-            print(f"Found {total_episodes} episodes in drama playlist")
+            # Get video URLs
+            video_urls = []
+            try:
+                video_urls = list(playlist.video_urls)
+                total_episodes = len(video_urls)
+                logger.info(f"Found {total_episodes} videos in playlist")
+                print(f"Found {total_episodes} episodes in drama playlist")
+            except Exception as e:
+                logger.error(f"Failed to get playlist videos: {str(e)}")
+                print(f"Error getting playlist videos: {str(e)}")
+                
+                # Fallback: try to extract URLs using yt-dlp
+                if self.yt_dlp_available:
+                    print("Attempting to get playlist info with yt-dlp...")
+                    try:
+                        cmd = ["yt-dlp", "--flat-playlist", "--get-id", data['link']]
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        if result.returncode == 0:
+                            video_ids = result.stdout.strip().split("\n")
+                            video_urls = [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids if vid]
+                            total_episodes = len(video_urls)
+                            print(f"Found {total_episodes} episodes using yt-dlp")
+                        else:
+                            print(f"yt-dlp playlist extraction failed: {result.stderr}")
+                    except Exception as e2:
+                        print(f"yt-dlp playlist extraction error: {str(e2)}")
+            
+            if not video_urls:
+                print("No videos found in playlist. Aborting drama processing.")
+                return
             
             # Process episodes one by one in sequence
             successful_episodes = 0
-            for idx, url in enumerate(playlist.video_urls, 1):
+            for idx, url in enumerate(video_urls, 1):
                 print(f"\n{'='*50}")
                 print(f"PROCESSING EPISODE {idx}/{total_episodes}")
                 print(f"{'='*50}")
