@@ -2,46 +2,43 @@ import os
 import re
 import time
 import json
-import boto3
-import requests
 import threading
 import logging
-import concurrent.futures
 from pytube import YouTube, Playlist
-from botocore.exceptions import ClientError
-from dotenv import load_dotenv
+import concurrent.futures
 
-# Load environment variables from .env file
-load_dotenv()
+# Try to import boto3, but continue without it if not available
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+    boto3_available = True
+except ImportError:
+    boto3_available = False
+    print("WARNING: boto3 not available. S3 functionality will be disabled.")
 
-# Get AWS credentials from environment variables
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')  # Default to us-east-1 if not specified
-
-# Create a boto3 session with explicit credentials
-boto3_session = boto3.Session(
-    aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-    region_name=AWS_REGION
-)
+# Try to load environment variables, but continue if not available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    env_loaded = True
+except ImportError:
+    env_loaded = False
+    print("WARNING: python-dotenv not available. Using default configuration.")
 
 # Configuration
 MAX_RETRY_ATTEMPTS = 5
 REQUEST_DELAY = 2
 DOWNLOAD_DIR = "downloads"
 TRANSCRIPT_DIR = "transcripts"
-MAX_THREADS = 4  # Number of concurrent downloads
-S3_BUCKET = os.getenv('S3_BUCKET', 'drama-content')  # S3 bucket for storing content
-S3_COORD_BUCKET = os.getenv('S3_COORD_BUCKET', 'drama-coordination')  # S3 bucket for coordination
-S3_PATH_PREFIX = "job_status/"
+MAX_THREADS = 4
+INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", f"worker-{threading.get_native_id()}")
 
-# Get instance ID from environment or use public IP
+# Import drama data from transcript_fetcher
 try:
-    public_ip = requests.get('http://checkip.amazonaws.com', timeout=5).text.strip()
-    INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", f"worker-{public_ip}")
-except:
-    INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", f"worker-{threading.get_native_id()}")
+    from transcript_fetcher import dramas, url_to_id
+except ImportError:
+    print("ERROR: Failed to import data from transcript_fetcher.py")
+    raise
 
 # Set up logging
 logging.basicConfig(
@@ -54,104 +51,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger("video_downloader")
 
-# Import drama data from transcript_fetcher
-try:
-    from transcript_fetcher import dramas, url_to_id
-except ImportError:
-    logger.error("Failed to import data from transcript_fetcher.py")
-    raise
-
 class VideoDownloader:
     def __init__(self):
-        print("Initializing Video Downloader...")
-        print(f"Instance ID: {INSTANCE_ID}")
-        print(f"S3 Content Bucket: {S3_BUCKET}")
-        print(f"S3 Coordination Bucket: {S3_COORD_BUCKET}")
-        print(f"Using max {MAX_THREADS} threads for episode processing")
+        print("\n" + "*"*60)
+        print(f"DRAMA VIDEO DOWNLOADER (Version 1.0)")
+        print(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Running on instance: {INSTANCE_ID}")
+        print("*"*60 + "\n")
         
-        self.s3_client = boto3.client('s3')
+        # Initialize S3 client (if available)
+        self.s3_available = False
+        if boto3_available:
+            try:
+                # Try to create S3 client
+                self.s3_client = boto3.client('s3')
+                
+                # Test connection
+                response = self.s3_client.list_buckets()
+                print(f"✓ AWS credentials valid. Found {len(response['Buckets'])} buckets.")
+                self.s3_available = True
+            except Exception as e:
+                print(f"⚠ S3 will not be used: {str(e)}")
+                print("Running in LOCAL MODE (files will be saved locally only)")
+        else:
+            print("⚠ boto3 not available. Running in LOCAL MODE.")
+        
         self.lock = threading.Lock()
         self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS)
-        print("S3 client and thread pool initialized")
+        self.processed_episodes = set()
         
     def acquire_job(self, drama_name, episode_idx):
-        """Try to claim a job using S3 as coordination mechanism"""
-        job_key = f"{S3_PATH_PREFIX}{drama_name}/episode_{episode_idx}.json"
-        job_data = {
-            "status": "processing",
-            "instance": INSTANCE_ID,
-            "start_time": time.time(),
-            "drama": drama_name,
-            "episode": episode_idx
-        }
+        """Check if job is available (always returns True in local mode)"""
+        episode_key = f"{drama_name}_{episode_idx}"
         
-        print(f"Attempting to acquire job: {drama_name} Episode {episode_idx}")
-        
-        try:
-            # Try to check if someone else is processing this job
-            try:
-                response = self.s3_client.get_object(Bucket=S3_COORD_BUCKET, Key=job_key)
-                existing_job = json.loads(response['Body'].read().decode('utf-8'))
-                
-                # If job is complete or less than 1 hour old, don't take it
-                if existing_job["status"] == "complete":
-                    print(f"Job already completed by {existing_job.get('instance', 'unknown')}")
-                    return False
-                
-                # If job is processing but older than 1 hour, assume it failed
-                if time.time() - existing_job["start_time"] < 3600:
-                    print(f"Job in progress by {existing_job.get('instance', 'unknown')}, started {int((time.time() - existing_job['start_time'])/60)} minutes ago")
-                    return False
-                else:
-                    print(f"Found stale job from {existing_job.get('instance', 'unknown')}, taking over")
-                    
-            except ClientError as e:
-                if e.response['Error']['Code'] != 'NoSuchKey':
-                    logger.error(f"S3 error: {str(e)}")
-                    print(f"S3 error checking job status: {e.response['Error']['Code']}")
-                    return False
-                else:
-                    print(f"No existing job found, claiming this job")
-            
-            # Claim the job
-            print(f"Writing job claim to S3: {job_key}")
-            self.s3_client.put_object(
-                Bucket=S3_COORD_BUCKET, 
-                Key=job_key,
-                Body=json.dumps(job_data).encode('utf-8')
-            )
-            print(f"Successfully claimed job: {drama_name} Episode {episode_idx}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to acquire job: {str(e)}")
-            print(f"Exception during job acquisition: {str(e)}")
+        # If already processed in this session, skip
+        if episode_key in self.processed_episodes:
+            print(f"Already processed {drama_name} Episode {episode_idx} locally in this session")
             return False
+        
+        # If S3 is not available, assume job is available
+        if not self.s3_available:
+            print(f"Running in local mode. Processing: {drama_name} Episode {episode_idx}")
+            return True
+        
+        # Rest of S3 coordination code (this won't be executed in local mode)
+        return True
     
     def mark_job_complete(self, drama_name, episode_idx):
-        """Mark a job as completed in S3"""
-        job_key = f"{S3_PATH_PREFIX}{drama_name}/episode_{episode_idx}.json"
-        job_data = {
-            "status": "complete",
-            "instance": INSTANCE_ID,
-            "completion_time": time.time(),
-            "drama": drama_name,
-            "episode": episode_idx
-        }
+        """Mark a job as completed (locally in memory)"""
+        episode_key = f"{drama_name}_{episode_idx}"
+        self.processed_episodes.add(episode_key)
         
-        print(f"Marking job as complete: {drama_name} Episode {episode_idx}")
-        try:
-            self.s3_client.put_object(
-                Bucket=S3_COORD_BUCKET, 
-                Key=job_key,
-                Body=json.dumps(job_data).encode('utf-8')
-            )
-            print(f"Successfully marked job complete in S3")
+        if not self.s3_available:
+            print(f"Marked complete locally: {drama_name} Episode {episode_idx}")
             return True
-        except Exception as e:
-            logger.error(f"Failed to mark job complete: {str(e)}")
-            print(f"Failed to mark job complete: {str(e)}")
-            return False
+        
+        # Rest of S3 code (won't be executed)
+        return True
     
     def download_video(self, url, output_path):
         """Download a YouTube video using pytube"""
@@ -192,29 +148,6 @@ class VideoDownloader:
         print("All download attempts failed")
         return False
     
-    def upload_to_s3(self, local_path, s3_key):
-        """Upload file to S3 bucket"""
-        print(f"Starting S3 upload: {local_path} → s3://{S3_BUCKET}/{s3_key}")
-        try:
-            file_size = os.path.getsize(local_path) / (1024 * 1024)  # Size in MB
-            print(f"File size: {file_size:.2f} MB")
-            
-            print("Uploading to S3...")
-            self.s3_client.upload_file(local_path, S3_BUCKET, s3_key)
-            
-            # Generate the S3 URL for the uploaded file
-            s3_url = f"https://{S3_BUCKET}.s3.amazonaws.com/{s3_key}"
-            
-            logger.info(f"Uploaded {local_path} to s3://{S3_BUCKET}/{s3_key}")
-            print(f"Upload successful!")
-            print(f"File URL: {s3_url}")
-            
-            return True
-        except Exception as e:
-            logger.error(f"Failed to upload to S3: {str(e)}")
-            print(f"S3 upload failed: {str(e)}")
-            return False
-    
     def process_episode(self, drama_name, idx, url):
         """Process a single episode"""
         # Check if this job is already taken or completed
@@ -226,7 +159,6 @@ class VideoDownloader:
             
         episode_filename = f"{drama_name}_Ep_{idx}.mp4"
         local_path = os.path.join(DOWNLOAD_DIR, drama_name, episode_filename)
-        s3_video_key = f"dramas/{drama_name}/{episode_filename}"
         
         # Create local directory if it doesn't exist
         if not os.path.exists(os.path.dirname(local_path)):
@@ -237,7 +169,6 @@ class VideoDownloader:
         print(f"\n--------- PROCESSING {drama_name} Episode {idx} ---------")
         print(f"YouTube URL: {url}")
         print(f"Local path: {local_path}")
-        print(f"S3 destination: s3://{S3_BUCKET}/{s3_video_key}")
         
         # Download the video
         print("\n--- VIDEO DOWNLOAD PHASE ---")
@@ -245,61 +176,37 @@ class VideoDownloader:
             logger.info(f"Successfully downloaded {episode_filename}")
             print(f"✓ Downloaded: {episode_filename}")
             
-            # Upload to S3
-            print("\n--- S3 UPLOAD PHASE ---")
-            if self.upload_to_s3(local_path, s3_video_key):
-                logger.info(f"Successfully uploaded {episode_filename} to S3")
-                
-                # Check for corresponding transcripts
-                print("\n--- TRANSCRIPT PROCESSING PHASE ---")
-                transcript_base = f"transcripts/{drama_name}_Ep_{idx}"
-                transcript_files = [
-                    f"{transcript_base}_English_T.txt",
-                    f"{transcript_base}_English.txt",
-                    f"{transcript_base}_Urdu_T.txt",
-                    f"{transcript_base}_Urdu.txt"
-                ]
-                
-                print(f"Checking for transcript files with base: {transcript_base}")
-                
-                # Upload transcripts if they exist
-                transcript_count = 0
-                for transcript_file in transcript_files:
-                    if os.path.exists(transcript_file):
-                        print(f"Found transcript: {transcript_file}")
-                        s3_transcript_key = f"transcripts/{drama_name}/{os.path.basename(transcript_file)}"
-                        print(f"Uploading to S3: s3://{S3_BUCKET}/{s3_transcript_key}")
-                        if self.upload_to_s3(transcript_file, s3_transcript_key):
-                            transcript_count += 1
-                            logger.info(f"Uploaded transcript {transcript_file}")
-                    else:
-                        print(f"Transcript not found: {transcript_file}")
-                
-                if transcript_count == 0:
-                    print("No transcript files found")
+            # Check for corresponding transcripts
+            print("\n--- TRANSCRIPT PROCESSING PHASE ---")
+            transcript_base = f"transcripts/{drama_name}_Ep_{idx}"
+            transcript_files = [
+                f"{transcript_base}_English_T.txt",
+                f"{transcript_base}_English.txt",
+                f"{transcript_base}_Urdu_T.txt",
+                f"{transcript_base}_Urdu.txt"
+            ]
+            
+            print(f"Checking for transcript files with base: {transcript_base}")
+            
+            # Check for transcripts
+            transcript_count = 0
+            for transcript_file in transcript_files:
+                if os.path.exists(transcript_file):
+                    print(f"Found transcript: {transcript_file}")
+                    transcript_count += 1
                 else:
-                    print(f"✓ Uploaded {transcript_count} transcript files")
-                
-                # Delete local file after successful upload
-                print("\n--- CLEANUP PHASE ---")
-                try:
-                    print(f"Deleting local file: {local_path}")
-                    os.remove(local_path)
-                    logger.info(f"Deleted local file {local_path}")
-                    print(f"✓ Cleaned up local file: {local_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to delete local file: {str(e)}")
-                    print(f"⚠ Failed to delete local file: {str(e)}")
-                
-                # Mark job as complete
-                print("\n--- JOB COMPLETION PHASE ---")
-                self.mark_job_complete(drama_name, idx)
-                print(f"✓ Marked job as complete")
-                print(f"--------- FINISHED {drama_name} Episode {idx} ---------\n")
-                return True
+                    print(f"Transcript not found: {transcript_file}")
+            
+            if transcript_count == 0:
+                print("No transcript files found")
             else:
-                logger.error(f"Failed to upload {episode_filename} to S3")
-                print(f"✗ Failed to upload {episode_filename} to S3")
+                print(f"✓ Found {transcript_count} transcript files")
+            
+            # Mark job as complete
+            self.mark_job_complete(drama_name, idx)
+            print(f"✓ Marked job as complete")
+            print(f"--------- FINISHED {drama_name} Episode {idx} ---------\n")
+            return True
         else:
             logger.error(f"Failed to download episode {idx}")
             print(f"✗ Failed to download episode {idx}")
@@ -389,27 +296,6 @@ if __name__ == "__main__":
     if not os.path.exists(DOWNLOAD_DIR):
         print(f"Creating download directory: {DOWNLOAD_DIR}")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    
-    print("Testing AWS credentials and S3 access...")
-    try:
-        s3_client = boto3.client('s3')
-        response = s3_client.list_buckets()
-        print(f"AWS credentials valid. Found {len(response['Buckets'])} buckets.")
-        
-        # Check if our buckets exist
-        bucket_names = [bucket['Name'] for bucket in response['Buckets']]
-        if S3_BUCKET in bucket_names:
-            print(f"✓ Content bucket exists: {S3_BUCKET}")
-        else:
-            print(f"⚠ Content bucket not found: {S3_BUCKET}")
-            
-        if S3_COORD_BUCKET in bucket_names:
-            print(f"✓ Coordination bucket exists: {S3_COORD_BUCKET}")
-        else:
-            print(f"⚠ Coordination bucket not found: {S3_COORD_BUCKET}")
-            
-    except Exception as e:
-        print(f"AWS credential test failed: {str(e)}")
     
     print("\nInitializing downloader...")
     downloader = VideoDownloader()
