@@ -4,26 +4,9 @@ import time
 import json
 import threading
 import logging
+import requests
 from pytube import YouTube, Playlist
 import concurrent.futures
-
-# Try to import boto3, but continue without it if not available
-try:
-    import boto3
-    from botocore.exceptions import ClientError
-    boto3_available = True
-except ImportError:
-    boto3_available = False
-    print("WARNING: boto3 not available. S3 functionality will be disabled.")
-
-# Try to load environment variables, but continue if not available
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-    env_loaded = True
-except ImportError:
-    env_loaded = False
-    print("WARNING: python-dotenv not available. Using default configuration.")
 
 # Configuration
 MAX_RETRY_ATTEMPTS = 5
@@ -32,6 +15,10 @@ DOWNLOAD_DIR = "downloads"
 TRANSCRIPT_DIR = "transcripts"
 MAX_THREADS = 4
 INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", f"worker-{threading.get_native_id()}")
+
+# Terabox credentials - Replace with your actual credentials
+TERABOX_USERNAME = "2022cs620@student.uet.edu.pk"
+TERABOX_PASSWORD = "Usm1230@"
 
 # Import drama data from transcript_fetcher
 try:
@@ -51,6 +38,144 @@ logging.basicConfig(
 )
 logger = logging.getLogger("video_downloader")
 
+class TeraboxUploader:
+    def __init__(self):
+        """Initialize Terabox API client"""
+        self.session = requests.Session()
+        self.logged_in = False
+        self.base_url = "https://www.terabox.com/api"
+        
+    def login(self):
+        """Login to Terabox account"""
+        print("Attempting to login to Terabox...")
+        try:
+            login_url = f"{self.base_url}/login"
+            payload = {
+                "username": TERABOX_USERNAME,
+                "password": TERABOX_PASSWORD
+            }
+            
+            response = self.session.post(login_url, data=payload)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("errno") == 0:
+                    self.logged_in = True
+                    print("✓ Successfully logged in to Terabox")
+                    return True
+                else:
+                    print(f"✗ Terabox login failed: {data.get('errmsg', 'Unknown error')}")
+            else:
+                print(f"✗ Terabox login failed with status code: {response.status_code}")
+                
+            return False
+        except Exception as e:
+            print(f"✗ Terabox login error: {str(e)}")
+            return False
+    
+    def create_folder(self, folder_path):
+        """Create a folder on Terabox (if it doesn't exist)"""
+        if not self.logged_in and not self.login():
+            print("Cannot create folder: Not logged in to Terabox")
+            return False
+            
+        try:
+            print(f"Creating folder in Terabox: {folder_path}")
+            create_url = f"{self.base_url}/create"
+            payload = {
+                "path": folder_path,
+                "isdir": 1
+            }
+            
+            response = self.session.post(create_url, data=payload)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("errno") == 0 or data.get("errno") == 31061:  # 31061 means folder already exists
+                    print(f"✓ Folder ready: {folder_path}")
+                    return True
+                else:
+                    print(f"✗ Failed to create folder: {data.get('errmsg', 'Unknown error')}")
+            else:
+                print(f"✗ Failed to create folder with status code: {response.status_code}")
+                
+            return False
+        except Exception as e:
+            print(f"✗ Create folder error: {str(e)}")
+            return False
+    
+    def upload_file(self, local_path, remote_path):
+        """Upload a file to Terabox"""
+        if not self.logged_in and not self.login():
+            print("Cannot upload file: Not logged in to Terabox")
+            return None
+            
+        try:
+            print(f"Uploading file to Terabox: {local_path} → {remote_path}")
+            file_size = os.path.getsize(local_path) / (1024 * 1024)
+            print(f"File size: {file_size:.2f} MB")
+            
+            # Ensure parent directory exists
+            parent_dir = os.path.dirname(remote_path)
+            if parent_dir and not self.create_folder(parent_dir):
+                print(f"Failed to create parent directory: {parent_dir}")
+                return None
+            
+            # Upload the file
+            upload_url = f"{self.base_url}/upload"
+            with open(local_path, 'rb') as file:
+                files = {'file': (os.path.basename(local_path), file)}
+                payload = {'path': remote_path}
+                
+                print("Starting upload...")
+                response = self.session.post(upload_url, data=payload, files=files)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("errno") == 0:
+                        print(f"✓ Successfully uploaded file to Terabox")
+                        # Get the share link
+                        file_id = data.get("fs_id")
+                        share_link = self.get_share_link(file_id) if file_id else None
+                        return share_link
+                    else:
+                        print(f"✗ Upload failed: {data.get('errmsg', 'Unknown error')}")
+                else:
+                    print(f"✗ Upload failed with status code: {response.status_code}")
+                
+            return None
+        except Exception as e:
+            print(f"✗ Upload error: {str(e)}")
+            return None
+    
+    def get_share_link(self, file_id):
+        """Get a shareable link for the uploaded file"""
+        try:
+            print(f"Getting share link for file ID: {file_id}")
+            share_url = f"{self.base_url}/share"
+            payload = {
+                "fs_ids": f"[{file_id}]",
+                "period": 0  # Permanent link
+            }
+            
+            response = self.session.post(share_url, data=payload)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("errno") == 0:
+                    link = data.get("link", "")
+                    if link:
+                        print(f"✓ Generated share link: {link}")
+                        return link
+                    else:
+                        print("✗ No share link received in response")
+                else:
+                    print(f"✗ Failed to get share link: {data.get('errmsg', 'Unknown error')}")
+            else:
+                print(f"✗ Failed to get share link with status code: {response.status_code}")
+                
+            return None
+        except Exception as e:
+            print(f"✗ Share link error: {str(e)}")
+            return None
+
 class VideoDownloader:
     def __init__(self):
         print("\n" + "*"*60)
@@ -59,56 +184,18 @@ class VideoDownloader:
         print(f"Running on instance: {INSTANCE_ID}")
         print("*"*60 + "\n")
         
-        # Initialize S3 client (if available)
-        self.s3_available = False
-        if boto3_available:
-            try:
-                # Try to create S3 client
-                self.s3_client = boto3.client('s3')
-                
-                # Test connection
-                response = self.s3_client.list_buckets()
-                print(f"✓ AWS credentials valid. Found {len(response['Buckets'])} buckets.")
-                self.s3_available = True
-            except Exception as e:
-                print(f"⚠ S3 will not be used: {str(e)}")
-                print("Running in LOCAL MODE (files will be saved locally only)")
-        else:
-            print("⚠ boto3 not available. Running in LOCAL MODE.")
-        
         self.lock = threading.Lock()
         self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS)
         self.processed_episodes = set()
         
-    def acquire_job(self, drama_name, episode_idx):
-        """Check if job is available (always returns True in local mode)"""
-        episode_key = f"{drama_name}_{episode_idx}"
+        # Initialize Terabox uploader
+        self.terabox = TeraboxUploader()
+        if self.terabox.login():
+            self.terabox_available = True
+        else:
+            self.terabox_available = False
+            print("⚠ Terabox login failed. Running in LOCAL MODE (files will be saved locally only)")
         
-        # If already processed in this session, skip
-        if episode_key in self.processed_episodes:
-            print(f"Already processed {drama_name} Episode {episode_idx} locally in this session")
-            return False
-        
-        # If S3 is not available, assume job is available
-        if not self.s3_available:
-            print(f"Running in local mode. Processing: {drama_name} Episode {episode_idx}")
-            return True
-        
-        # Rest of S3 coordination code (this won't be executed in local mode)
-        return True
-    
-    def mark_job_complete(self, drama_name, episode_idx):
-        """Mark a job as completed (locally in memory)"""
-        episode_key = f"{drama_name}_{episode_idx}"
-        self.processed_episodes.add(episode_key)
-        
-        if not self.s3_available:
-            print(f"Marked complete locally: {drama_name} Episode {episode_idx}")
-            return True
-        
-        # Rest of S3 code (won't be executed)
-        return True
-    
     def download_video(self, url, output_path):
         """Download a YouTube video using pytube"""
         print(f"Starting download from URL: {url}")
@@ -150,15 +237,15 @@ class VideoDownloader:
     
     def process_episode(self, drama_name, idx, url):
         """Process a single episode"""
-        # Check if this job is already taken or completed
-        print(f"\nChecking if {drama_name} Episode {idx} is available to process...")
-        if not self.acquire_job(drama_name, idx):
-            logger.info(f"Skipping {drama_name} episode {idx} - already processed or being processed")
-            print(f"Skipping {drama_name} episode {idx} - already processed or being processed")
+        # Check if this job is already processed
+        episode_key = f"{drama_name}_{idx}"
+        if episode_key in self.processed_episodes:
+            print(f"Skipping {drama_name} episode {idx} - already processed in this session")
             return False
             
         episode_filename = f"{drama_name}_Ep_{idx}.mp4"
         local_path = os.path.join(DOWNLOAD_DIR, drama_name, episode_filename)
+        terabox_path = f"/dramas/{drama_name}/{episode_filename}"
         
         # Create local directory if it doesn't exist
         if not os.path.exists(os.path.dirname(local_path)):
@@ -176,6 +263,28 @@ class VideoDownloader:
             logger.info(f"Successfully downloaded {episode_filename}")
             print(f"✓ Downloaded: {episode_filename}")
             
+            # Upload to Terabox if available
+            if self.terabox_available:
+                print("\n--- TERABOX UPLOAD PHASE ---")
+                terabox_link = self.terabox.upload_file(local_path, terabox_path)
+                if terabox_link:
+                    print(f"✓ Uploaded to Terabox: {terabox_path}")
+                    print(f"Terabox Link: {terabox_link}")
+                    
+                    # Delete local file after successful upload
+                    try:
+                        print(f"Deleting local file: {local_path}")
+                        os.remove(local_path)
+                        logger.info(f"Deleted local file {local_path}")
+                        print(f"✓ Cleaned up local file: {local_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete local file: {str(e)}")
+                        print(f"⚠ Failed to delete local file: {str(e)}")
+                else:
+                    print(f"✗ Failed to upload to Terabox. Keeping local file.")
+            else:
+                print("Terabox upload skipped. File saved locally.")
+            
             # Check for corresponding transcripts
             print("\n--- TRANSCRIPT PROCESSING PHASE ---")
             transcript_base = f"transcripts/{drama_name}_Ep_{idx}"
@@ -188,11 +297,19 @@ class VideoDownloader:
             
             print(f"Checking for transcript files with base: {transcript_base}")
             
-            # Check for transcripts
+            # Upload transcripts if they exist
             transcript_count = 0
             for transcript_file in transcript_files:
                 if os.path.exists(transcript_file):
                     print(f"Found transcript: {transcript_file}")
+                    
+                    # Upload transcript to Terabox if available
+                    if self.terabox_available:
+                        terabox_transcript_path = f"/transcripts/{drama_name}/{os.path.basename(transcript_file)}"
+                        transcript_link = self.terabox.upload_file(transcript_file, terabox_transcript_path)
+                        if transcript_link:
+                            print(f"✓ Uploaded transcript to Terabox: {transcript_link}")
+                    
                     transcript_count += 1
                 else:
                     print(f"Transcript not found: {transcript_file}")
@@ -200,11 +317,11 @@ class VideoDownloader:
             if transcript_count == 0:
                 print("No transcript files found")
             else:
-                print(f"✓ Found {transcript_count} transcript files")
+                print(f"✓ Processed {transcript_count} transcript files")
             
-            # Mark job as complete
-            self.mark_job_complete(drama_name, idx)
-            print(f"✓ Marked job as complete")
+            # Mark episode as processed
+            self.processed_episodes.add(episode_key)
+            print(f"✓ Marked episode as processed")
             print(f"--------- FINISHED {drama_name} Episode {idx} ---------\n")
             return True
         else:
@@ -286,12 +403,6 @@ class VideoDownloader:
 
 
 if __name__ == "__main__":
-    print("\n" + "*"*60)
-    print(f"DRAMA VIDEO DOWNLOADER (Version 1.0)")
-    print(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Running on instance: {INSTANCE_ID}")
-    print("*"*60 + "\n")
-    
     # Create directories if they don't exist
     if not os.path.exists(DOWNLOAD_DIR):
         print(f"Creating download directory: {DOWNLOAD_DIR}")
