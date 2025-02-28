@@ -19,7 +19,13 @@ MAX_THREADS = 4  # Number of concurrent downloads
 S3_BUCKET = "drama-content"  # S3 bucket for storing content
 S3_COORD_BUCKET = "drama-coordination"  # S3 bucket for coordination
 S3_PATH_PREFIX = "job_status/"
-INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", f"worker-{threading.get_native_id()}")
+
+# Get instance ID from environment or use public IP
+try:
+    public_ip = requests.get('http://checkip.amazonaws.com', timeout=5).text.strip()
+    INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", f"worker-{public_ip}")
+except:
+    INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", f"worker-{threading.get_native_id()}")
 
 # Set up logging
 logging.basicConfig(
