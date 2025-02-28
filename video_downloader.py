@@ -19,8 +19,8 @@ MAX_THREADS = 4
 INSTANCE_ID = os.environ.get("AWS_INSTANCE_ID", f"worker-{threading.get_native_id()}")
 
 # Terabox credentials - Replace with your actual credentials
-TERABOX_USERNAME = "your_terabox_email"
-TERABOX_PASSWORD = "your_terabox_password"
+TERABOX_USERNAME = "2022cs620@student.uet.edu.pk"
+TERABOX_PASSWORD = "Usm1230@"
 
 # Import drama data from transcript_fetcher
 try:
